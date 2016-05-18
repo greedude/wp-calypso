@@ -8,6 +8,7 @@ const ReactDom = require( 'react-dom' ),
 	debounce = require( 'lodash/debounce' ),
 	throttle = require( 'lodash/throttle' ),
 	assign = require( 'lodash/assign' );
+import merge from 'lodash/merge';
 import { connect } from 'react-redux';
 import { bindActionCreators } from 'redux';
 
@@ -47,8 +48,11 @@ const actions = require( 'lib/posts/actions' ),
 	VerifyEmailDialogI18n = require( 'post-editor/verify-email-dialog.i18n' ); // temporary for i18n tools to pick up
 
 import { setEditorLastDraft, resetEditorLastDraft } from 'state/ui/editor/last-draft/actions';
-import { isEditorDraftsVisible } from 'state/ui/editor/selectors';
+import { isEditorDraftsVisible, getEditorPostId } from 'state/ui/editor/selectors';
 import { toggleEditorDraftsVisible } from 'state/ui/editor/actions';
+import { getSelectedSiteId } from 'state/ui/selectors';
+import { receivePost, editPost, resetPostEdits } from 'state/posts/actions';
+import { getPostEdits, isEditedPostDirty, isEditedPostContentEmpty } from 'state/posts/selectors';
 import EditorSidebarHeader from 'post-editor/editor-sidebar/header';
 
 const messages = {
@@ -168,6 +172,7 @@ const messages = {
 
 const PostEditor = React.createClass( {
 	propTypes: {
+		siteId: React.PropTypes.number,
 		preferences: React.PropTypes.object,
 		sites: React.PropTypes.object
 	},
@@ -221,6 +226,19 @@ const PostEditor = React.createClass( {
 		// if content is passed in, e.g., through url param
 		if ( this.state.post && this.state.post.content ) {
 			this.refs.editor.setEditorContent( this.state.post.content );
+		}
+	},
+
+	componentWillUpdate( nextProps, nextState ) {
+		const { savedPost } = nextState;
+		if ( savedPost && savedPost !== this.state.savedPost ) {
+			nextProps.receivePost( savedPost );
+		}
+
+		if ( nextState.isDirty || nextProps.dirty ) {
+			this.markChanged();
+		} else {
+			this.markSaved();
 		}
 	},
 
@@ -379,9 +397,9 @@ const PostEditor = React.createClass( {
 								savedPost={ this.state.savedPost }
 								post={ this.state.post }
 								isNew={ this.state.isNew }
-								isDirty={ this.state.isDirty }
+								isDirty={ this.state.isDirty || this.props.dirty }
 								isSaveBlocked={ this.state.isSaveBlocked }
-								hasContent={ this.state.hasContent }
+								hasContent={ this.state.hasContent || ! this.props.postContentEmpty }
 								isSaving={ this.state.isSaving }
 								isPublishing={ this.state.isPublishing }
 								onSave={ this.onSave }
@@ -486,11 +504,6 @@ const PostEditor = React.createClass( {
 				}
 			} );
 		}
-		if ( PostEditStore.isDirty() ) {
-			this.markChanged();
-		} else {
-			this.markSaved();
-		}
 	},
 
 	onEditorContentChange: function() {
@@ -519,7 +532,10 @@ const PostEditor = React.createClass( {
 
 		this.saveRawContent();
 		// TODO: REDUX - remove flux actions when whole post-editor is reduxified
-		actions.edit( { content: this.refs.editor.getContent() } );
+		const edits = merge( {}, this.props.edits, {
+			content: this.refs.editor.getContent()
+		} );
+		actions.edit( edits );
 
 		// Make sure that after TinyMCE processing that the post is still dirty
 		if ( ! PostEditStore.isDirty() || ! PostEditStore.hasContent() || ! this.state.post ) {
@@ -594,8 +610,7 @@ const PostEditor = React.createClass( {
 	},
 
 	onSave: function( status, callback ) {
-		var edits = {};
-
+		const edits = merge( {}, this.props.edits );
 		if ( status ) {
 			edits.status = status;
 		}
@@ -663,7 +678,7 @@ const PostEditor = React.createClass( {
 	},
 
 	iframePreview: function() {
-		if ( this.state.isDirty ) {
+		if ( this.state.isDirty || this.props.dirty ) {
 			this.autosave();
 			// to avoid a weird UX we clear the iframe when (auto)saving
 			// so we need to delay opening it a bit to avoid flickering
@@ -713,7 +728,9 @@ const PostEditor = React.createClass( {
 	},
 
 	onPublish: function() {
-		var edits = { status: 'publish' };
+		const edits = merge( {}, this.props.edits, {
+			status: 'publish'
+		} );
 
 		// determine if this is a private publish
 		if ( utils.isPrivate( this.state.post ) ) {
@@ -786,6 +803,13 @@ const PostEditor = React.createClass( {
 		} else {
 			this.props.resetEditorLastDraft();
 		}
+
+		// Update global state to reflect newly saved post and reset all
+		// previous edits (preserving type).
+		this.props.receivePost( post );
+		this.props.resetPostEdits( this.props.siteId );
+		this.props.resetPostEdits( post.site_ID, post.ID );
+		this.props.editPost( { type: this.props.type }, post.site_ID, post.ID );
 
 		// make sure the history entry has the post ID in it, but don't dispatch
 		page.replace(
@@ -860,15 +884,25 @@ const PostEditor = React.createClass( {
 
 export default connect(
 	( state ) => {
+		const siteId = getSelectedSiteId( state );
+		const postId = getEditorPostId( state );
+
 		return {
-			showDrafts: isEditorDraftsVisible( state )
+			siteId,
+			showDrafts: isEditorDraftsVisible( state ),
+			edits: getPostEdits( state, siteId, postId ),
+			dirty: isEditedPostDirty( state, siteId, postId ),
+			postContentEmpty: isEditedPostContentEmpty( state, siteId, postId )
 		};
 	},
 	( dispatch ) => {
 		return bindActionCreators( {
 			toggleDrafts: toggleEditorDraftsVisible,
 			setEditorLastDraft,
-			resetEditorLastDraft
+			resetEditorLastDraft,
+			receivePost,
+			editPost,
+			resetPostEdits
 		}, dispatch );
 	},
 	null,
